@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fix Swift 6 concurrency diagnostics by refactoring the URL protocol interceptor to avoid capturing mutable state and to operate on value-type `URLRequest`s when retrying/refreshing sessions (improves Android Swift toolchain support).
 - Resolve Linux/Android compatibility issues by importing `FoundationNetworking` where required, updating the sign-out flow to avoid capturing mutable requests, and replacing `NSPredicate` regex evaluation with `NSRegularExpression`.
+- Run all session events (creation, refresh, unauthorised, sign out, payload updates) and the `signOut` completion handler on the main queue by default so Swift 6 + Skip Fuse projects can safely mutate `@MainActor` state from callbacks.
 
 ## [0.4.3] - 2025-03-26
 

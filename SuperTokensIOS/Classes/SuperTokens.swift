@@ -107,9 +107,18 @@ public class SuperTokens {
     }
     
     public static func signOut(completionHandler: @escaping (Error?) -> Void) {
+        let completionOnMain: (Error?) -> Void = { error in
+            if Thread.isMainThread {
+                completionHandler(error)
+            } else {
+                DispatchQueue.main.async {
+                    completionHandler(error)
+                }
+            }
+        }
         if !doesSessionExist() {
             SuperTokens.config!.eventHandler(.SIGN_OUT)
-            completionHandler(nil)
+            completionOnMain(nil)
             return
         }
         
@@ -142,7 +151,7 @@ public class SuperTokens {
                 }
                 
                 if httpResponse.statusCode >= 300 {
-                    completionHandler(SuperTokensError.apiError(message: "Sign out failed with response code \(httpResponse.statusCode)"))
+                    completionOnMain(SuperTokensError.apiError(message: "Sign out failed with response code \(httpResponse.statusCode)"))
                     executionSemaphore.signal()
                     return
                 }
@@ -151,18 +160,18 @@ public class SuperTokens {
                 
                 if let _data: Data = data, let jsonResponse: SignOutResponse = try? JSONDecoder().decode(SignOutResponse.self, from: _data) {
                     if jsonResponse.status == "GENERAL_ERROR" {
-                        completionHandler(SuperTokensError.generalError(message: jsonResponse.message!))
+                        completionOnMain(SuperTokensError.generalError(message: jsonResponse.message!))
                         executionSemaphore.signal()
                     } else {
-                        completionHandler(nil)
+                        completionOnMain(nil)
                         executionSemaphore.signal()
                     }
                 } else {
-                    completionHandler(SuperTokensError.apiError(message: "Invalid sign out response"))
+                    completionOnMain(SuperTokensError.apiError(message: "Invalid sign out response"))
                     executionSemaphore.signal()
                 }
             } else {
-                completionHandler(nil)
+                completionOnMain(nil)
                 executionSemaphore.signal()
             }
             

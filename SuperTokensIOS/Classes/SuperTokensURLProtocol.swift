@@ -10,16 +10,12 @@
 @preconcurrency import FoundationNetworking
 #endif
 
-public class SuperTokensURLProtocol: URLProtocol {
+@preconcurrency public class SuperTokensURLProtocol: URLProtocol {
     private static let readWriteDispatchQueue = DispatchQueue(label: "io.supertokens.session.readwrite", attributes: .concurrent)
     private var sessionRefreshAttempts = 0
     
     // Refer to comment in makeRequest to know why this is needed
     private var requestForRetry: URLRequest? = nil
-    
-    private struct ProtocolReference: @unchecked Sendable {
-        unowned let instance: SuperTokensURLProtocol
-    }
     
     public required override init(request: URLRequest, cachedResponse: CachedURLResponse?, client: URLProtocolClient?) {
         super.init(request: request, cachedResponse: cachedResponse, client: client)
@@ -60,12 +56,16 @@ public class SuperTokensURLProtocol: URLProtocol {
     }
     
     public override func startLoading() {
+        scheduleMakeRequest()
+    }
+    
+    private func scheduleMakeRequest() {
         // we have a read write lock here. We take a read lock while making a request and a write lock while refreshing
-        // because if we dno't do that, then there may be a race condition where we may read a new id refresh token from storage
+        // because if we don't do that, then there may be a race condition where we may read a new id refresh token from storage
         // but the cookies may still be the older ones.
-        let reference = ProtocolReference(instance: self)
-        SuperTokensURLProtocol.readWriteDispatchQueue.async {
-            reference.instance.makeRequest()
+        SuperTokensURLProtocol.readWriteDispatchQueue.async { [weak self] in
+            guard let self else { return }
+            self.makeRequest()
         }
     }
     
@@ -91,8 +91,6 @@ public class SuperTokensURLProtocol: URLProtocol {
         requestForRetry = nil
         
         requestToSend = removeAuthHeaderIfMatchesLocalToken(requestToSend)
-        let reference = ProtocolReference(instance: self)
-        
         let preRequestLocalSessionState = Utils.getLocalSessionState()
         
         if preRequestLocalSessionState.status == .EXISTS {
@@ -115,7 +113,8 @@ public class SuperTokensURLProtocol: URLProtocol {
         
         // We need to use a custom URLSession here because otherwise it will use this protocol, causing an infinite loop
         let customSession = URLSession(configuration: URLSessionConfiguration.default)
-        customSession.dataTask(with: apiRequest, completionHandler: { data, response, error in
+        customSession.dataTask(with: apiRequest, completionHandler: { [weak self] data, response, error in
+            guard let self else { return }
             
             if let httpResponse = response as? HTTPURLResponse {
                 Utils.saveTokenFromHeaders(httpResponse: httpResponse)
@@ -131,34 +130,35 @@ public class SuperTokensURLProtocol: URLProtocol {
                     * To prevent this infinite loop, we break out of the loop after retrying the original request a specified number of times.
                     * The maximum number of retry attempts is defined by maxRetryAttemptsForSessionRefresh config variable.
                     */
-                    if reference.instance.sessionRefreshAttempts >= SuperTokens.config!.maxRetryAttemptsForSessionRefresh {
+                    if self.sessionRefreshAttempts >= SuperTokens.config!.maxRetryAttemptsForSessionRefresh {
                         let errorMessage = "Error: Received 401 response from \(String(describing: apiRequest.url)). After refreshing the session and retrying the request \(SuperTokens.config!.maxRetryAttemptsForSessionRefresh ) times, we still received 401 responses. Maximum session refresh limit reached. Breaking out of the refresh loop. Please investigate your API. Consider increasing maxRetryAttemptsForSessionRefresh in the config if needed."
                         print(errorMessage)
-                        reference.instance.resolveToUser(data: nil, response: nil, error: SuperTokensError.maxRetryAttemptsReachedForSessionRefresh(message: errorMessage))
+                        self.resolveToUser(data: nil, response: nil, error: SuperTokensError.maxRetryAttemptsReachedForSessionRefresh(message: errorMessage))
                         return
                     }
                     
-                    let retryReadyRequest = reference.instance.removeAuthHeaderIfMatchesLocalToken(apiRequest)
-                    SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: { unauthResponse in
+                    let retryReadyRequest = self.removeAuthHeaderIfMatchesLocalToken(apiRequest)
+                    SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: { [weak self] unauthResponse in
+                        guard let self else { return }
                         
-                        reference.instance.sessionRefreshAttempts += 1;
+                        self.sessionRefreshAttempts += 1
                         
                         if unauthResponse.status == .RETRY {
-                            reference.instance.requestForRetry = retryReadyRequest
-                            reference.instance.makeRequest()
+                            self.requestForRetry = retryReadyRequest
+                            self.scheduleMakeRequest()
                         } else {
                             if unauthResponse.error != nil {
-                                reference.instance.resolveToUser(data: nil, response: nil, error: unauthResponse.error)
+                                self.resolveToUser(data: nil, response: nil, error: unauthResponse.error)
                             } else {
-                                reference.instance.resolveToUser(data: data, response: response, error: unauthResponse.error)
+                                self.resolveToUser(data: data, response: response, error: unauthResponse.error)
                             }
                         }
                     })
                 } else {
-                    reference.instance.resolveToUser(data: data, response: response, error: error)
+                    self.resolveToUser(data: data, response: response, error: error)
                 }
             } else {
-                reference.instance.resolveToUser(data: data, response: response, error: error)
+                self.resolveToUser(data: data, response: response, error: error)
             }
         }).resume()
     }

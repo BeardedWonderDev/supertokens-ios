@@ -132,9 +132,15 @@ class NormalisedInputType {
             _sessionTokenBackendDomain = try normaliseSessionScopeOrThrowError(sessionScope: sessionTokenBackendDomain!)
         }
         
-        var _eventHandler: (EventType) -> Void = { _ in }
-        if eventHandler != nil {
-            _eventHandler = eventHandler!
+        let providedEventHandler: (EventType) -> Void = eventHandler ?? { _ in }
+        let _eventHandler: (EventType) -> Void = { event in
+            if Thread.isMainThread {
+                providedEventHandler(event)
+            } else {
+                DispatchQueue.main.async {
+                    providedEventHandler(event)
+                }
+            }
         }
         
         var _preAPIHook: (APIAction, URLRequest) -> URLRequest = {
