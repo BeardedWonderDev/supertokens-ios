@@ -5,16 +5,23 @@
 //  Created by Nemi Shah on 30/09/22.
 //
 
-import Foundation
+@preconcurrency import Foundation
+#if canImport(FoundationNetworking)
+@preconcurrency import FoundationNetworking
+#endif
 
 public class SuperTokensURLProtocol: URLProtocol {
     private static let readWriteDispatchQueue = DispatchQueue(label: "io.supertokens.session.readwrite", attributes: .concurrent)
     private var sessionRefreshAttempts = 0
     
     // Refer to comment in makeRequest to know why this is needed
-    private var requestForRetry: NSMutableURLRequest? = nil
+    private var requestForRetry: URLRequest? = nil
     
-    override public init(request: URLRequest, cachedResponse: CachedURLResponse?, client: URLProtocolClient?) {
+    private struct ProtocolReference: @unchecked Sendable {
+        unowned let instance: SuperTokensURLProtocol
+    }
+    
+    public required override init(request: URLRequest, cachedResponse: CachedURLResponse?, client: URLProtocolClient?) {
         super.init(request: request, cachedResponse: cachedResponse, client: client)
     }
     
@@ -56,65 +63,61 @@ public class SuperTokensURLProtocol: URLProtocol {
         // we have a read write lock here. We take a read lock while making a request and a write lock while refreshing
         // because if we dno't do that, then there may be a race condition where we may read a new id refresh token from storage
         // but the cookies may still be the older ones.
+        let reference = ProtocolReference(instance: self)
         SuperTokensURLProtocol.readWriteDispatchQueue.async {
-            self.makeRequest()
+            reference.instance.makeRequest()
         }
     }
     
-    private func removeAuthHeaderIfMatchesLocalToken(_mutableRequest: NSMutableURLRequest) -> NSMutableURLRequest {
+    private func removeAuthHeaderIfMatchesLocalToken(_ request: URLRequest) -> URLRequest {
+        var updatedRequest = request
         // .value is case insensitive
-        if let originalAuthorizationHeader = _mutableRequest.value(forHTTPHeaderField: "Authorization") {
+        if let originalAuthorizationHeader = updatedRequest.value(forHTTPHeaderField: "Authorization") {
             let accessToken = Utils.getTokenForHeaderAuth(tokenType: .access)
             let refreshToken = Utils.getTokenForHeaderAuth(tokenType: .refresh)
             
             if accessToken != nil && refreshToken != nil && originalAuthorizationHeader == "Bearer \(accessToken!)" {
                 // Removing headers from a request is not case insensitive
-                _mutableRequest.setValue(nil, forHTTPHeaderField: "Authorization")
-                _mutableRequest.setValue(nil, forHTTPHeaderField: "authorization")
+                updatedRequest.setValue(nil, forHTTPHeaderField: "Authorization")
+                updatedRequest.setValue(nil, forHTTPHeaderField: "authorization")
             }
         }
         
-        return _mutableRequest
+        return updatedRequest
     }
     
     func makeRequest() {
-        var mutableRequest = (self.request as NSURLRequest).mutableCopy() as! NSMutableURLRequest
+        var requestToSend = requestForRetry ?? self.request
+        requestForRetry = nil
         
-        // When this function is called for retrying we cannot use the global request
-        // because that will not have the modified headers
-        if requestForRetry != nil {
-            mutableRequest = requestForRetry!
-            requestForRetry = nil
-        }
-        
-        mutableRequest = removeAuthHeaderIfMatchesLocalToken(_mutableRequest: mutableRequest)
+        requestToSend = removeAuthHeaderIfMatchesLocalToken(requestToSend)
+        let reference = ProtocolReference(instance: self)
         
         let preRequestLocalSessionState = Utils.getLocalSessionState()
         
         if preRequestLocalSessionState.status == .EXISTS {
             let antiCSRF = AntiCSRF.getToken(associatedAccessTokenUpdate: preRequestLocalSessionState.lastAccessTokenUpdate!)
             if antiCSRF != nil {
-                mutableRequest.setValue(antiCSRF!, forHTTPHeaderField: SuperTokensConstants.antiCSRFHeaderKey)
+                requestToSend.setValue(antiCSRF!, forHTTPHeaderField: SuperTokensConstants.antiCSRFHeaderKey)
             }
         }
         
-        if mutableRequest.value(forHTTPHeaderField: "rid") == nil {
-            mutableRequest.addValue("anti-csrf", forHTTPHeaderField: "rid")
+        if requestToSend.value(forHTTPHeaderField: "rid") == nil {
+            requestToSend.addValue("anti-csrf", forHTTPHeaderField: "rid")
         }
         
         let tokenTransferMethod = SuperTokens.config!.tokenTransferMethod
-        mutableRequest.setValue(tokenTransferMethod.rawValue, forHTTPHeaderField: "st-auth-mode")
+        requestToSend.setValue(tokenTransferMethod.rawValue, forHTTPHeaderField: "st-auth-mode")
         
-        Utils.setAuthorizationHeaderIfRequired(mutableRequest: mutableRequest)
+        Utils.setAuthorizationHeaderIfRequired(request: &requestToSend)
         
-        let apiRequest = mutableRequest.copy() as! URLRequest
+        let apiRequest = requestToSend
         
         // We need to use a custom URLSession here because otherwise it will use this protocol, causing an infinite loop
         let customSession = URLSession(configuration: URLSessionConfiguration.default)
-        customSession.dataTask(with: apiRequest, completionHandler: {
-            data, response, error in
+        customSession.dataTask(with: apiRequest, completionHandler: { data, response, error in
             
-            if let httpResponse: HTTPURLResponse = response as? HTTPURLResponse {
+            if let httpResponse = response as? HTTPURLResponse {
                 Utils.saveTokenFromHeaders(httpResponse: httpResponse)
                 Utils.fireSessionUpdateEventsIfNecessary(
                     wasLoggedIn: preRequestLocalSessionState.status == .EXISTS,
@@ -128,35 +131,34 @@ public class SuperTokensURLProtocol: URLProtocol {
                     * To prevent this infinite loop, we break out of the loop after retrying the original request a specified number of times.
                     * The maximum number of retry attempts is defined by maxRetryAttemptsForSessionRefresh config variable.
                     */
-                    if self.sessionRefreshAttempts >= SuperTokens.config!.maxRetryAttemptsForSessionRefresh {
+                    if reference.instance.sessionRefreshAttempts >= SuperTokens.config!.maxRetryAttemptsForSessionRefresh {
                         let errorMessage = "Error: Received 401 response from \(String(describing: apiRequest.url)). After refreshing the session and retrying the request \(SuperTokens.config!.maxRetryAttemptsForSessionRefresh ) times, we still received 401 responses. Maximum session refresh limit reached. Breaking out of the refresh loop. Please investigate your API. Consider increasing maxRetryAttemptsForSessionRefresh in the config if needed."
                         print(errorMessage)
-                        self.resolveToUser(data: nil, response: nil, error: SuperTokensError.maxRetryAttemptsReachedForSessionRefresh(message: errorMessage))
+                        reference.instance.resolveToUser(data: nil, response: nil, error: SuperTokensError.maxRetryAttemptsReachedForSessionRefresh(message: errorMessage))
                         return
                     }
-
-                    mutableRequest = self.removeAuthHeaderIfMatchesLocalToken(_mutableRequest: mutableRequest)
-                    SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: {
-                        unauthResponse in
+                    
+                    let retryReadyRequest = reference.instance.removeAuthHeaderIfMatchesLocalToken(apiRequest)
+                    SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: { unauthResponse in
                         
-                        self.sessionRefreshAttempts += 1;
+                        reference.instance.sessionRefreshAttempts += 1;
                         
                         if unauthResponse.status == .RETRY {
-                            self.requestForRetry = mutableRequest
-                            self.makeRequest()
-                        } else {                            
+                            reference.instance.requestForRetry = retryReadyRequest
+                            reference.instance.makeRequest()
+                        } else {
                             if unauthResponse.error != nil {
-                                self.resolveToUser(data: nil, response: nil, error: unauthResponse.error)
+                                reference.instance.resolveToUser(data: nil, response: nil, error: unauthResponse.error)
                             } else {
-                                self.resolveToUser(data: data, response: response, error: unauthResponse.error)
+                                reference.instance.resolveToUser(data: data, response: response, error: unauthResponse.error)
                             }
                         }
                     })
-                } else {                    
-                    self.resolveToUser(data: data, response: response, error: error)
+                } else {
+                    reference.instance.resolveToUser(data: data, response: response, error: error)
                 }
             } else {
-                self.resolveToUser(data: data, response: response, error: error)
+                reference.instance.resolveToUser(data: data, response: response, error: error)
             }
         }).resume()
     }
@@ -211,19 +213,17 @@ public class SuperTokensURLProtocol: URLProtocol {
             let tokenTransferMethod = SuperTokens.config!.tokenTransferMethod
             refreshRequest.setValue(tokenTransferMethod.rawValue, forHTTPHeaderField: "st-auth-mode")
             
-            // We need a mutable one here because URLRequest does not allow setting headers
-            // if the request is passed as a param to a function
-            let mutableRefreshRequest = (refreshRequest as NSURLRequest).mutableCopy() as! NSMutableURLRequest
+            Utils.setAuthorizationHeaderIfRequired(request: &refreshRequest, addRefreshToken: true)
             
-            Utils.setAuthorizationHeaderIfRequired(mutableRequest: mutableRefreshRequest, addRefreshToken: true)
+            refreshRequest = SuperTokens.config!.preAPIHook(.REFRESH_SESSION, refreshRequest)
             
-            refreshRequest = SuperTokens.config!.preAPIHook(.REFRESH_SESSION, mutableRefreshRequest.copy() as! URLRequest)
+            let refreshApiRequest = refreshRequest
             
             let semaphore = DispatchSemaphore(value: 0)
             
             // We need to use a custom URLSession here because otherwise it will use this protocol, causing an infinite loop
             let customSession = URLSession(configuration: URLSessionConfiguration.default)
-            let refreshTask = customSession.dataTask(with: refreshRequest, completionHandler: { data, response, error in
+            let refreshTask = customSession.dataTask(with: refreshApiRequest, completionHandler: { data, response, error in
                 
                 if response as? HTTPURLResponse != nil {
                     let httpResponse = response as! HTTPURLResponse
@@ -250,7 +250,7 @@ public class SuperTokensURLProtocol: URLProtocol {
                         return
                     }
                     
-                    SuperTokens.config!.postAPIHook(.REFRESH_SESSION, refreshRequest, response)
+                    SuperTokens.config!.postAPIHook(.REFRESH_SESSION, refreshApiRequest, response)
                     
                     if Utils.getLocalSessionState().status == .NOT_EXISTS {
                         // The execution should never come here.. but just in case.

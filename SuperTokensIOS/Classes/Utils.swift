@@ -6,6 +6,9 @@
 //
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 internal enum TokenType {
     case access, refresh
@@ -301,7 +304,7 @@ internal class Utils {
         return getFromStorage(name: name)
     }
     
-    internal static func setAuthorizationHeaderIfRequired(mutableRequest: NSMutableURLRequest, addRefreshToken: Bool = false) {
+    internal static func setAuthorizationHeaderIfRequired(request: inout URLRequest, addRefreshToken: Bool = false) {
         // We set the Authorization header even if the tokenTransferMethod preference set in the config is cookies
         // since the active session may be using cookies. By default, we want to allow users to continue these sessions.
         // The new session preference should be applied at the start of the next session, if the backend allows it.
@@ -313,11 +316,11 @@ internal class Utils {
         // Still, we only add the Authorization header if both are present, because we are planning to add an option to expose the
         // access token to the frontend while using cookie based auth - so that users can get the access token to use
         if accessToken != nil && refreshToken != nil {
-            if mutableRequest.value(forHTTPHeaderField: "Authorization") != nil {
+            if request.value(forHTTPHeaderField: "Authorization") != nil {
                 // no-op
             } else {
                 let tokenToAdd = addRefreshToken ? refreshToken! : accessToken!
-                mutableRequest.setValue("Bearer \(tokenToAdd)", forHTTPHeaderField: "Authorization")
+                request.setValue("Bearer \(tokenToAdd)", forHTTPHeaderField: "Authorization")
             }
         }
     }

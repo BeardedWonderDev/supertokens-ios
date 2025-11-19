@@ -13,7 +13,16 @@ extension String {
     }
     
     func matches(regex: String) -> Bool {
-        return NSPredicate(format: "SELF MATCHES %@", regex).evaluate(with: self)
+        guard let expression = try? NSRegularExpression(pattern: regex) else {
+            return false
+        }
+        
+        let range = NSRange(startIndex..<endIndex, in: self)
+        guard let match = expression.firstMatch(in: self, options: [], range: range) else {
+            return false
+        }
+        
+        return match.range == range
     }
     
     func indexOf(character: Character) -> String.Index? {

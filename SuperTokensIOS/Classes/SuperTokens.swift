@@ -14,6 +14,9 @@
  */
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public enum EventType {
     case SIGN_OUT
@@ -124,10 +127,11 @@ public class SuperTokens {
         signOutRequest.addValue(SuperTokens.rid, forHTTPHeaderField: "rid")
         
         signOutRequest = SuperTokens.config!.preAPIHook(.SIGN_OUT, signOutRequest)
+        let finalSignOutRequest = signOutRequest
         
         let executionSemaphore = DispatchSemaphore(value: 0)
         
-        customSession.dataTask(with: signOutRequest, completionHandler: {
+        customSession.dataTask(with: finalSignOutRequest, completionHandler: {
             data, response, error in
             
             if let httpResponse: HTTPURLResponse = response as? HTTPURLResponse {
@@ -143,7 +147,7 @@ public class SuperTokens {
                     return
                 }
                 
-                SuperTokens.config!.postAPIHook(.SIGN_OUT, signOutRequest, response)
+                SuperTokens.config!.postAPIHook(.SIGN_OUT, finalSignOutRequest, response)
                 
                 if let _data: Data = data, let jsonResponse: SignOutResponse = try? JSONDecoder().decode(SignOutResponse.self, from: _data) {
                     if jsonResponse.status == "GENERAL_ERROR" {
