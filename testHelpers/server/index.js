@@ -15,6 +15,12 @@
 let SuperTokens = require("supertokens-node");
 let SuperTokensRaw = require("supertokens-node/lib/build/supertokens").default;
 let SessionRecipeRaw = require("supertokens-node/lib/build/recipe/session/recipe").default;
+let AccountLinkingRecipeRaw;
+try {
+    AccountLinkingRecipeRaw = require("supertokens-node/lib/build/recipe/accountlinking/recipe").default;
+} catch {
+    // Older supertokens-node versions don't ship AccountLinking yet
+}
 let Session = require("supertokens-node/recipe/session");
 let express = require("express");
 let cookieParser = require("cookie-parser");
@@ -257,6 +263,9 @@ app.post("/startst", async (req, res) => {
         if (UserMetaDataRecipeRaw !== undefined) {
             UserMetaDataRecipeRaw.reset();
         }
+        if (AccountLinkingRecipeRaw !== undefined) {
+            AccountLinkingRecipeRaw.reset();
+        }
         console.log({multitenancySupported, MultitenancyRaw, UserMetaDataRecipeRaw});
 
         SuperTokens.init(getConfig(enableAntiCsrf, enableJWT));
@@ -287,6 +296,9 @@ app.post("/reinitialiseBackendConfig", async (req, res) => {
     }
     if (UserMetaDataRecipeRaw !== undefined) {
         UserMetaDataRecipeRaw.reset();
+    }
+    if (AccountLinkingRecipeRaw !== undefined) {
+        AccountLinkingRecipeRaw.reset();
     }
     SuperTokens.init(getConfig(lastSetEnableAntiCSRF, currentEnableJWT, jwtPropertyName));
 
