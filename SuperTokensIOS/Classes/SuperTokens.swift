@@ -13,9 +13,9 @@
  * under the License.
  */
 
-import Foundation
+@preconcurrency import Foundation
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+@preconcurrency import FoundationNetworking
 #endif
 
 public enum EventType {
@@ -49,7 +49,7 @@ public class SuperTokens {
         FrontToken.setItem(frontToken: "remove")
     }
     
-    public static func initialize(apiDomain: String, apiBasePath: String? = nil, sessionExpiredStatusCode: Int? = nil, sessionTokenBackendDomain: String? = nil,  maxRetryAttemptsForSessionRefresh: Int? = nil, tokenTransferMethod: SuperTokensTokenTransferMethod? = nil, userDefaultsSuiteName: String? = nil, eventHandler: ((EventType) -> Void)? = nil, preAPIHook: ((APIAction, URLRequest) -> URLRequest)? = nil, postAPIHook: ((APIAction, URLRequest, URLResponse?) -> Void)? = nil) throws {
+    public static func initialize(apiDomain: String, apiBasePath: String? = nil, sessionExpiredStatusCode: Int? = nil, sessionTokenBackendDomain: String? = nil,  maxRetryAttemptsForSessionRefresh: Int? = nil, tokenTransferMethod: SuperTokensTokenTransferMethod? = nil, userDefaultsSuiteName: String? = nil, eventHandler: (@Sendable (EventType) -> Void)? = nil, preAPIHook: (@Sendable (APIAction, URLRequest) -> URLRequest)? = nil, postAPIHook: (@Sendable (APIAction, URLRequest, URLResponse?) -> Void)? = nil) throws {
         if SuperTokens.isInitCalled {
             return;
         }
@@ -76,38 +76,21 @@ public class SuperTokens {
         let currentTimeInMillis: Int = Int(Date().timeIntervalSince1970 * 1000)
         
         if let accessTokenExpiry: Int = tokenInfo!["ate"] as? Int, accessTokenExpiry < currentTimeInMillis {
-            let executionSemaphore = DispatchSemaphore(value: 0)
-            var shouldRetry: Bool = false
-            var error: Error?
             let preRequestLocalSessionState = Utils.getLocalSessionState()
-            
-            SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: { unauthResponse in
-                
-                if unauthResponse.status == .API_ERROR {
-                    error = unauthResponse.error
-                }
-                
-                shouldRetry = unauthResponse.status == .RETRY
-                executionSemaphore.signal()
-                
-            })
-            
-            executionSemaphore.wait()
-            
-            // Here we dont throw the error and instead return false, because
-            // otherwise users would have to use a try catch just to call doesSessionExist
-            if error != nil {
+            let unauthResponse = SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState)
+
+            if unauthResponse.status == .API_ERROR {
                 return false
             }
-            
-            return shouldRetry
+
+            return unauthResponse.status == .RETRY
         }
         
         return true
     }
     
-    public static func signOut(completionHandler: @escaping (Error?) -> Void) {
-        let completionOnMain: (Error?) -> Void = { error in
+    public static func signOut(completionHandler: @escaping @Sendable (Error?) -> Void) {
+        let completionOnMain: @Sendable (Error?) -> Void = { error in
             if Thread.isMainThread {
                 completionHandler(error)
             } else {
@@ -185,28 +168,13 @@ public class SuperTokens {
         }
         
         let preRequestLocalSessionState = Utils.getLocalSessionState()
-        var error: Error?
-        let executionSemaphore = DispatchSemaphore(value: 0)
-        var shouldRetry: Bool = false
-        
-        SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: {
-            unauthResponse in
-            
-            if unauthResponse.status == .API_ERROR {
-                error = unauthResponse.error
-            }
-            
-            shouldRetry = unauthResponse.status == .RETRY
-            executionSemaphore.signal()
-        })
-        
-        executionSemaphore.wait()
-        
-        if error != nil {
-            throw error!
+        let unauthResponse = SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState)
+
+        if unauthResponse.status == .API_ERROR {
+            throw unauthResponse.error ?? SuperTokensError.apiError(message: "refresh session failed with unknown error")
         }
-        
-        return shouldRetry
+
+        return unauthResponse.status == .RETRY
     }
     
     public static func getUserId() throws -> String {

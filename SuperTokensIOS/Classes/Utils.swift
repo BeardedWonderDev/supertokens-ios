@@ -5,9 +5,9 @@
 //  Created by Nemi Shah on 30/09/22.
 //
 
-import Foundation
+@preconcurrency import Foundation
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+@preconcurrency import FoundationNetworking
 #endif
 
 internal enum TokenType {
@@ -28,21 +28,16 @@ internal enum LocalSessionStateStatus {
     case NOT_EXISTS, EXISTS
 }
 
-internal class LocalSessionState {
+internal struct LocalSessionState: Sendable {
     let status: LocalSessionStateStatus
     let lastAccessTokenUpdate: String?
-    
-    init(status: LocalSessionStateStatus, lastAccessTokenUpdate: String?) {
-        self.status = status
-        self.lastAccessTokenUpdate = lastAccessTokenUpdate
-    }
 }
 
 public enum SuperTokensTokenTransferMethod: String {
     case cookie, header
 }
 
-class NormalisedInputType {
+final class NormalisedInputType: @unchecked Sendable {
     var apiDomain: String
     var apiBasePath: String
     var sessionExpiredStatusCode: Int
@@ -54,13 +49,13 @@ class NormalisedInputType {
      */
     var maxRetryAttemptsForSessionRefresh: Int
     var sessionTokenBackendDomain: String?
-    var eventHandler: (EventType) -> Void
-    var preAPIHook: (APIAction, URLRequest) -> URLRequest
-    var postAPIHook: (APIAction, URLRequest, URLResponse?) -> Void
+    var eventHandler: @Sendable (EventType) -> Void
+    var preAPIHook: @Sendable (APIAction, URLRequest) -> URLRequest
+    var postAPIHook: @Sendable (APIAction, URLRequest, URLResponse?) -> Void
     var userDefaultsSuiteName: String?
     var tokenTransferMethod: SuperTokensTokenTransferMethod
     
-    init(apiDomain: String, apiBasePath: String, sessionExpiredStatusCode: Int, maxRetryAttemptsForSessionRefresh: Int, sessionTokenBackendDomain: String?, tokenTransferMethod: SuperTokensTokenTransferMethod, eventHandler: @escaping (EventType) -> Void, preAPIHook: @escaping (APIAction, URLRequest) -> URLRequest, postAPIHook: @escaping (APIAction, URLRequest, URLResponse?) -> Void, userDefaultsSuiteName: String?) {
+    init(apiDomain: String, apiBasePath: String, sessionExpiredStatusCode: Int, maxRetryAttemptsForSessionRefresh: Int, sessionTokenBackendDomain: String?, tokenTransferMethod: SuperTokensTokenTransferMethod, eventHandler: @escaping @Sendable (EventType) -> Void, preAPIHook: @escaping @Sendable (APIAction, URLRequest) -> URLRequest, postAPIHook: @escaping @Sendable (APIAction, URLRequest, URLResponse?) -> Void, userDefaultsSuiteName: String?) {
         self.apiDomain = apiDomain
         self.apiBasePath = apiBasePath
         self.sessionExpiredStatusCode = sessionExpiredStatusCode
@@ -109,7 +104,7 @@ class NormalisedInputType {
         return noDotNormalised
     }
     
-    internal static func normaliseInputType(apiDomain: String, apiBasePath: String?, sessionExpiredStatusCode: Int?, maxRetryAttemptsForSessionRefresh: Int? = nil, sessionTokenBackendDomain: String?, tokenTransferMethod: SuperTokensTokenTransferMethod?, eventHandler: ((EventType) -> Void)?, preAPIHook: ((APIAction, URLRequest) -> URLRequest)?, postAPIHook: ((APIAction, URLRequest, URLResponse?) -> Void)?, userDefaultsSuiteName: String?) throws -> NormalisedInputType {
+    internal static func normaliseInputType(apiDomain: String, apiBasePath: String?, sessionExpiredStatusCode: Int?, maxRetryAttemptsForSessionRefresh: Int? = nil, sessionTokenBackendDomain: String?, tokenTransferMethod: SuperTokensTokenTransferMethod?, eventHandler: (@Sendable (EventType) -> Void)?, preAPIHook: (@Sendable (APIAction, URLRequest) -> URLRequest)?, postAPIHook: (@Sendable (APIAction, URLRequest, URLResponse?) -> Void)?, userDefaultsSuiteName: String?) throws -> NormalisedInputType {
         let _apiDomain = try NormalisedURLDomain(url: apiDomain)
         var _apiBasePath = try NormalisedURLPath(input: "/auth")
         
@@ -132,8 +127,8 @@ class NormalisedInputType {
             _sessionTokenBackendDomain = try normaliseSessionScopeOrThrowError(sessionScope: sessionTokenBackendDomain!)
         }
         
-        let providedEventHandler: (EventType) -> Void = eventHandler ?? { _ in }
-        let _eventHandler: (EventType) -> Void = { event in
+        let providedEventHandler: @Sendable (EventType) -> Void = eventHandler ?? { _ in }
+        let _eventHandler: @Sendable (EventType) -> Void = { event in
             if Thread.isMainThread {
                 providedEventHandler(event)
             } else {
@@ -142,17 +137,17 @@ class NormalisedInputType {
                 }
             }
         }
-        
-        var _preAPIHook: (APIAction, URLRequest) -> URLRequest = {
+
+        var _preAPIHook: @Sendable (APIAction, URLRequest) -> URLRequest = {
             _, request in
-            
+
             return request
         }
         if preAPIHook != nil {
             _preAPIHook = preAPIHook!
         }
         
-        var _postApiHook: (APIAction, URLRequest, URLResponse?) -> Void = {
+        var _postApiHook: @Sendable (APIAction, URLRequest, URLResponse?) -> Void = {
             _, _, _ in
         }
         if postAPIHook != nil {
@@ -365,7 +360,7 @@ internal class Utils {
     }
 }
 
-internal struct SignOutResponse: Codable {
+internal struct SignOutResponse: Codable, Sendable {
     var status: String
     var message: String?
 }

@@ -5,7 +5,7 @@
 //  Created by Nemi Shah on 30/09/22.
 //
 
-import Foundation
+@preconcurrency import Foundation
 
 internal class FrontToken {
     static var tokenInMemory: String? = nil
@@ -38,32 +38,32 @@ internal class FrontToken {
     }
     
     private static func getTokenInfo() -> [String: Any]? {
-        var finalReturnValue: [String: Any]? = nil
-        let executionSemaphore = DispatchSemaphore(value: 0)
-        
-        readWriteDispatchQueue.async {
-            while (true) {
-                let frontToken: String? = getFrontToken()
-                
-                if frontToken == nil {
+        while true {
+            enum FrontTokenCheckResult {
+                case wait
+                case resolved([String: Any]?)
+            }
+
+            let result: FrontTokenCheckResult = readWriteDispatchQueue.sync {
+                guard let frontToken = getFrontToken() else {
                     let localSessionState = Utils.getLocalSessionState()
                     if localSessionState.status == .EXISTS {
-                        tokenInfoSemaphore.wait()
-                    } else {
-                        finalReturnValue = nil
-                        executionSemaphore.signal()
-                        break
+                        return .wait
                     }
-                } else {
-                    finalReturnValue = parseFrontToken(frontTokenDecoded: frontToken!)
-                    executionSemaphore.signal()
-                    break
+
+                    return .resolved(nil)
                 }
+
+                return .resolved(parseFrontToken(frontTokenDecoded: frontToken))
+            }
+
+            switch result {
+            case .resolved(let value):
+                return value
+            case .wait:
+                tokenInfoSemaphore.wait()
             }
         }
-        
-        executionSemaphore.wait()
-        return finalReturnValue
     }
     
     static func getToken() -> [String: Any]? {
