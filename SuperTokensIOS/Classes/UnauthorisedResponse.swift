@@ -12,19 +12,14 @@
  * License for the specific language governing permissions and limitations
  * under the License.
  */
-import Foundation
+@preconcurrency import Foundation
 
-internal class UnauthorisedResponse {
-    internal enum UnauthorisedStatus {
+internal struct UnauthorisedResponse: Sendable {
+    internal enum UnauthorisedStatus: Sendable {
         case SESSION_EXPIRED
         case API_ERROR
         case RETRY
     }
     let status: UnauthorisedStatus
     let error: Error?
-    
-    init(status: UnauthorisedStatus, error: Error? = nil) {
-        self.status = status
-        self.error = error
-    }
 }

@@ -10,7 +10,7 @@
 @preconcurrency import FoundationNetworking
 #endif
 
-@preconcurrency public class SuperTokensURLProtocol: URLProtocol {
+@preconcurrency public class SuperTokensURLProtocol: URLProtocol, @unchecked Sendable {
     private static let readWriteDispatchQueue = DispatchQueue(label: "io.supertokens.session.readwrite", attributes: .concurrent)
     private var sessionRefreshAttempts = 0
     
@@ -138,22 +138,20 @@
                     }
                     
                     let retryReadyRequest = self.removeAuthHeaderIfMatchesLocalToken(apiRequest)
-                    SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState, callback: { [weak self] unauthResponse in
-                        guard let self else { return }
-                        
-                        self.sessionRefreshAttempts += 1
-                        
-                        if unauthResponse.status == .RETRY {
-                            self.requestForRetry = retryReadyRequest
-                            self.scheduleMakeRequest()
+                    let unauthResponse = SuperTokensURLProtocol.onUnauthorisedResponse(preRequestLocalSessionState: preRequestLocalSessionState)
+
+                    self.sessionRefreshAttempts += 1
+
+                    if unauthResponse.status == .RETRY {
+                        self.requestForRetry = retryReadyRequest
+                        self.scheduleMakeRequest()
+                    } else {
+                        if unauthResponse.error != nil {
+                            self.resolveToUser(data: nil, response: nil, error: unauthResponse.error)
                         } else {
-                            if unauthResponse.error != nil {
-                                self.resolveToUser(data: nil, response: nil, error: unauthResponse.error)
-                            } else {
-                                self.resolveToUser(data: data, response: response, error: unauthResponse.error)
-                            }
+                            self.resolveToUser(data: data, response: response, error: unauthResponse.error)
                         }
-                    })
+                    }
                 } else {
                     self.resolveToUser(data: data, response: response, error: error)
                 }
@@ -181,103 +179,109 @@
         self.client?.urlProtocolDidFinishLoading(self)
     }
     
-    static func onUnauthorisedResponse(preRequestLocalSessionState: LocalSessionState, callback: @escaping (UnauthorisedResponse) -> Void) {
-        SuperTokensURLProtocol.readWriteDispatchQueue.async(flags: .barrier) {
+    static func onUnauthorisedResponse(preRequestLocalSessionState: LocalSessionState) -> UnauthorisedResponse {
+        SuperTokensURLProtocol.readWriteDispatchQueue.sync(flags: .barrier) {
             let postLockLocalSessionState = Utils.getLocalSessionState()
-            
+
             if postLockLocalSessionState.status == .NOT_EXISTS {
                 SuperTokens.config!.eventHandler(.UNAUTHORISED)
-                callback(UnauthorisedResponse(status: UnauthorisedResponse.UnauthorisedStatus.SESSION_EXPIRED))
-                return
+                return UnauthorisedResponse(status: .SESSION_EXPIRED, error: nil)
             }
-            
+
             if postLockLocalSessionState.status != preRequestLocalSessionState.status || (postLockLocalSessionState.status == .EXISTS && preRequestLocalSessionState.status == .EXISTS && postLockLocalSessionState.lastAccessTokenUpdate! != preRequestLocalSessionState.lastAccessTokenUpdate!) {
-                callback(UnauthorisedResponse(status: UnauthorisedResponse.UnauthorisedStatus.RETRY))
-                return;
+                return UnauthorisedResponse(status: .RETRY, error: nil)
             }
-            
+
             let refreshUrl = URL(string: SuperTokens.refreshTokenUrl)!
             var refreshRequest = URLRequest(url: refreshUrl)
             refreshRequest.httpMethod = "POST"
-            
+
             if preRequestLocalSessionState.status == .EXISTS {
-                let antiCSRF = AntiCSRF.getToken(associatedAccessTokenUpdate: preRequestLocalSessionState.lastAccessTokenUpdate!)
-                if antiCSRF != nil {
-                    refreshRequest.addValue(antiCSRF!, forHTTPHeaderField: SuperTokensConstants.antiCSRFHeaderKey)
+                if let antiCSRF = AntiCSRF.getToken(associatedAccessTokenUpdate: preRequestLocalSessionState.lastAccessTokenUpdate!) {
+                    refreshRequest.addValue(antiCSRF, forHTTPHeaderField: SuperTokensConstants.antiCSRFHeaderKey)
                 }
             }
-            
+
             refreshRequest.addValue(SuperTokens.rid, forHTTPHeaderField: "rid")
             refreshRequest.addValue(Version.supported_fdi.joined(separator: ","), forHTTPHeaderField: "fdi-version")
-            
+
             let tokenTransferMethod = SuperTokens.config!.tokenTransferMethod
             refreshRequest.setValue(tokenTransferMethod.rawValue, forHTTPHeaderField: "st-auth-mode")
-            
+
             Utils.setAuthorizationHeaderIfRequired(request: &refreshRequest, addRefreshToken: true)
-            
+
             refreshRequest = SuperTokens.config!.preAPIHook(.REFRESH_SESSION, refreshRequest)
-            
+
             let refreshApiRequest = refreshRequest
-            
+
             let semaphore = DispatchSemaphore(value: 0)
-            
+            var unauthResponse = UnauthorisedResponse(status: .API_ERROR, error: SuperTokensError.apiError(message: "Refresh session request timed out"))
+
             // We need to use a custom URLSession here because otherwise it will use this protocol, causing an infinite loop
             let customSession = URLSession(configuration: URLSessionConfiguration.default)
             let refreshTask = customSession.dataTask(with: refreshApiRequest, completionHandler: { data, response, error in
-                
-                if response as? HTTPURLResponse != nil {
-                    let httpResponse = response as! HTTPURLResponse
-                    
+
+                if let httpResponse = response as? HTTPURLResponse {
                     Utils.saveTokenFromHeaders(httpResponse: httpResponse)
-                    
+
                     let isUnauthorised = httpResponse.statusCode == SuperTokens.config!.sessionExpiredStatusCode
-                    
+
                     if isUnauthorised && httpResponse.value(forHTTPHeaderField: SuperTokensConstants.frontTokenHeaderKey) == nil {
                         FrontToken.setItem(frontToken: "remove")
                     }
-                    
+
                     let frontTokenInHeaders = httpResponse.value(forHTTPHeaderField: SuperTokensConstants.frontTokenHeaderKey)
-                    
+
                     Utils.fireSessionUpdateEventsIfNecessary(
                         wasLoggedIn: preRequestLocalSessionState.status == .EXISTS,
                         status: httpResponse.statusCode,
-                        frontTokenheaderFromResponse: frontTokenInHeaders == nil ? "remove" : frontTokenInHeaders!
+                        frontTokenheaderFromResponse: frontTokenInHeaders ?? "remove"
                     )
-                    
-                    if httpResponse.statusCode >= 300 {
-                        semaphore.signal()
-                        callback(UnauthorisedResponse(status: UnauthorisedResponse.UnauthorisedStatus.API_ERROR, error: SuperTokensError.apiError(message: "Refresh API returned with status code: \(httpResponse.statusCode)")))
-                        return
-                    }
-                    
-                    SuperTokens.config!.postAPIHook(.REFRESH_SESSION, refreshApiRequest, response)
-                    
-                    if Utils.getLocalSessionState().status == .NOT_EXISTS {
-                        // The execution should never come here.. but just in case.
-                        // removed by server. So we logout
 
-                        // we do not send "UNAUTHORISED" event here because
-                        // this is a result of the refresh API returning a session expiry, which
-                        // means that the frontend did not know for sure that the session existed
-                        // in the first place.
+                    if httpResponse.statusCode >= 300 {
+                        unauthResponse = UnauthorisedResponse(
+                            status: .API_ERROR,
+                            error: SuperTokensError.apiError(message: "refresh session call failed with status code: \(httpResponse.statusCode)")
+                        )
                         semaphore.signal()
-                        callback(UnauthorisedResponse(status: UnauthorisedResponse.UnauthorisedStatus.SESSION_EXPIRED))
                         return
                     }
-                    
-                    semaphore.signal()
+
+                    SuperTokens.config!.postAPIHook(.REFRESH_SESSION, refreshApiRequest, response)
+
+                    if Utils.getLocalSessionState().status == .NOT_EXISTS {
+                        unauthResponse = UnauthorisedResponse(status: .SESSION_EXPIRED, error: nil)
+                        semaphore.signal()
+                        return
+                    }
+
                     SuperTokens.config!.eventHandler(.REFRESH_SESSION)
-                    callback(UnauthorisedResponse(status: UnauthorisedResponse.UnauthorisedStatus.RETRY))
-                } else {
-                    semaphore.signal()
-                    callback(UnauthorisedResponse(status: UnauthorisedResponse.UnauthorisedStatus.API_ERROR, error: error))
                 }
+
+                if let error {
+                    unauthResponse = UnauthorisedResponse(status: .API_ERROR, error: error)
+                    semaphore.signal()
+                    return
+                }
+
+                Utils.saveLastAccessTokenUpdate()
+                unauthResponse = UnauthorisedResponse(status: .RETRY, error: nil)
+
+                semaphore.signal()
+
             })
+
             refreshTask.resume()
-            semaphore.wait()    // this is there so that this function call waits for the callback to exeicute so that we still have the write lock on our queue.
+
+            if semaphore.wait(timeout: .now() + 15) == .timedOut {
+                refreshTask.cancel()
+                return UnauthorisedResponse(status: .API_ERROR, error: SuperTokensError.apiError(message: "Refresh session request timed out"))
+            }
+
+            return unauthResponse
         }
     }
-    
+
     public override func stopLoading() {
         // Do nothing, this is required to be implemented
     }
